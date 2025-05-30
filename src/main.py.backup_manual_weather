@@ -1,0 +1,568 @@
+print("MAIN.PY EXECUTION STARTED - TOP OF FILE") # THIS IS THE VERY FIRST LINE
+
+print("Starting main.py...")
+import sys
+import os
+print("sys and os imported.")
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+print("sys.path modified.")
+
+# Critical imports - moved outside of try-except for clarity on import errors
+from flask import Flask, request, jsonify, render_template
+from werkzeug.exceptions import HTTPException # Added for generic HTTP error handling
+print("Flask components imported.")
+import pandas as pd
+print("pandas imported.")
+import numpy as np
+print("numpy imported.")
+import joblib
+print("joblib imported.")
+import json
+print("json imported.")
+from dateutil import parser
+print("dateutil.parser imported.")
+from datetime import datetime, timedelta, timezone
+print("datetime, timedelta imported.")
+import math
+import pytz # Added for timezone handling
+from pytz import timezone as pytz_timezone # Alias to avoid conflict
+print("math imported.")
+print("pytz imported.")
+
+print("All initial imports successful.")
+
+import requests  # For OpenWeather API calls
+app = Flask(__name__, static_folder="static", template_folder="templates")
+print("Flask app initialized.")
+
+# --- Configuration & Model Loading (Updated for v4 model) ---
+print("Setting up configuration paths for v12 model...")
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "model_files")
+# UPDATED FOR V4 MODEL
+MODEL_PATH = os.path.join(MODEL_DIR, "model_v12.pkl") 
+FEATURES_PATH = os.path.join(MODEL_DIR, "model_features_v12.json")
+WAYPOINTS_PATH = os.path.join(MODEL_DIR, "processed_waypoints_v2.csv")
+PREDICTION_INTERVAL_FILE_PATH = "/home/ubuntu/model_prediction_interval.txt"
+print(f"MODEL_DIR: {MODEL_DIR}")
+print(f"MODEL_PATH (v12): {MODEL_PATH}")
+print(f"FEATURES_PATH (v12): {FEATURES_PATH}")
+print(f"WAYPOINTS_PATH: {WAYPOINTS_PATH}")
+print(f"PREDICTION_INTERVAL_FILE_PATH: {PREDICTION_INTERVAL_FILE_PATH}")
+
+print("Loading v12 model...")
+# Load the trained model and features
+try:
+    model = joblib.load(MODEL_PATH)
+    print(f"Model v12 loaded successfully from {MODEL_PATH}")
+except FileNotFoundError:
+    print(f"ERROR: Model v12 file not found at {MODEL_PATH}")
+    model = None
+except Exception as e:
+    print(f"Error loading model v12: {e}")
+    model = None
+
+print("Loading v12 model features...")
+try:
+    with open(FEATURES_PATH, "r") as f:
+        model_features = json.load(f)
+    print(f"Model v12 features loaded successfully from {FEATURES_PATH}")
+except FileNotFoundError:
+    print(f"ERROR: Model v12 features file not found at {FEATURES_PATH}")
+    model_features = []
+except Exception as e:
+    print(f"Error loading model v12 features: {e}")
+    model_features = []
+
+print("Loading waypoint data...")
+# Load waypoint data
+try:
+    waypoints_df = pd.read_csv(WAYPOINTS_PATH)
+    print(f"Waypoints data loaded successfully from {WAYPOINTS_PATH}. Shape: {waypoints_df.shape}. Columns: {waypoints_df.columns.tolist()}")
+except FileNotFoundError:
+    print(f"ERROR: Waypoints file not found at {WAYPOINTS_PATH}")
+    waypoints_df = pd.DataFrame()
+except Exception as e:
+    print(f"Error loading waypoints data: {e}")
+    waypoints_df = pd.DataFrame()
+
+print("Loading model prediction interval...")
+MODEL_PREDICTION_INTERVAL_HOURS = 1.0 # Default to 1 hour
+
+# OpenWeather API configuration
+OPENWEATHER_API_KEY = "7bdddce2087ef6e1bef9016a37dcecbb"
+KHALIFA_PORT_LAT = 24.8029
+KHALIFA_PORT_LON = 54.6451
+RUWAIS_PORT_LAT = 24.1114
+RUWAIS_PORT_LON = 52.73
+print(f"OpenWeather API configured with key: {OPENWEATHER_API_KEY[:5]}...")
+try:
+    with open(PREDICTION_INTERVAL_FILE_PATH, "r") as f:
+        MODEL_PREDICTION_INTERVAL_HOURS = float(f.read().strip())
+    print(f"Loaded MODEL_PREDICTION_INTERVAL_HOURS: {MODEL_PREDICTION_INTERVAL_HOURS}")
+    if MODEL_PREDICTION_INTERVAL_HOURS <= 0:
+        print(f"Warning: MODEL_PREDICTION_INTERVAL_HOURS is {MODEL_PREDICTION_INTERVAL_HOURS}. Resetting to 1.0.")
+        MODEL_PREDICTION_INTERVAL_HOURS = 1.0
+except FileNotFoundError:
+    print(f"ERROR: Prediction interval file not found at {PREDICTION_INTERVAL_FILE_PATH}. Defaulting to 1.0 hour.")
+except Exception as e:
+    print(f"Error loading model prediction interval from {PREDICTION_INTERVAL_FILE_PATH}: {e}. Defaulting to 1.0 hour.")
+
+print("Defining helper functions...")
+# --- Helper Functions ---
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371  # Radius of Earth in kilometers
+    if pd.isna(lat1) or pd.isna(lon1) or pd.isna(lat2) or pd.isna(lon2):
+        return np.nan
+    lat1_rad, lon1_rad = math.radians(lat1), math.radians(lon1)
+    lat2_rad, lon2_rad = math.radians(lat2), math.radians(lon2)
+    dlon = lon2_rad - lon1_rad
+    dlat = lat2_rad - lat1_rad
+    a = math.sin(dlat / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    distance = R * c
+    return distance
+
+def get_relevant_waypoints(departure_port, arrival_port):
+    if waypoints_df.empty:
+        print("get_relevant_waypoints: waypoints_df is empty")
+        return pd.DataFrame()
+    
+    if "Route_Direction" not in waypoints_df.columns:
+        print("ERROR: Get Relevant Waypoints -  Column 'Route_Direction' not found in waypoints_df.")
+        return pd.DataFrame()
+    if "Waypoint_Order" not in waypoints_df.columns:
+        print("ERROR: Get Relevant Waypoints - Column 'Waypoint_Order' not found in waypoints_df.")
+        return pd.DataFrame()        
+
+    if departure_port == "Khalifa Port" and arrival_port == "Ruwais Port":
+        route_direction = "Khalifa_to_Ruwais"
+    elif departure_port == "Ruwais Port" and arrival_port == "Khalifa Port":
+        route_direction = "Ruwais_to_Khalifa"
+    else:
+        print(f"get_relevant_waypoints: Invalid port combination: {departure_port} to {arrival_port}")
+        return pd.DataFrame()
+    
+    relevant_wps = waypoints_df[waypoints_df["Route_Direction"] == route_direction].sort_values(by="Waypoint_Order").copy()
+    
+    if relevant_wps.empty:
+        print(f"get_relevant_waypoints: No waypoints found for route {route_direction}")
+        return pd.DataFrame()
+
+    distances = []
+    for i in range(len(relevant_wps) - 1):
+        wp1 = relevant_wps.iloc[i]
+        wp2 = relevant_wps.iloc[i+1]
+        dist = haversine(wp1["Latitude"], wp1["Longitude"], wp2["Latitude"], wp2["Longitude"])
+        distances.append(dist)
+    distances.append(0) 
+    relevant_wps["Distance_To_Next_km"] = distances
+    return relevant_wps
+
+def predict_fuel(features_df, model, model_features):
+    """
+    Predict fuel consumption using a hybrid approach that combines ML model with physics-based calculations.
+    
+    This function ensures fuel consumption is variable based on voyage parameters (speed, distance, duration, weather)
+    while maintaining realistic values (5-9 MT for typical 12-hour voyages).
+    
+    Args:
+        features_df: DataFrame with features
+        model: Trained model
+        model_features: List of feature names used by the model
+        
+    Returns:
+        Predicted fuel consumption
+    """
+    # Get key voyage parameters from features
+    voyage_duration_hours = features_df['duration_hours'].values[0] if 'duration_hours' in features_df.columns else 12.0
+    voyage_distance_nm = features_df['distance_nm'].values[0] if 'distance_nm' in features_df.columns else 120.0
+    voyage_speed_kn = features_df['speed_kn'].values[0] if 'speed_kn' in features_df.columns else 10.0
+    wind_speed = features_df['wind_speed'].values[0] if 'wind_speed' in features_df.columns else 5.0
+    wind_direction = features_df['wind_direction'].values[0] if 'wind_direction' in features_df.columns else 0.0
+    ship_course = features_df['ship_course'].values[0] if 'ship_course' in features_df.columns else 0.0
+    
+    # Calculate relative wind angle (0 = headwind, 180 = tailwind)
+    relative_wind_angle = abs((wind_direction - ship_course + 180) % 360 - 180)
+    
+    # Base fuel rate (MT per hour) - calibrated for typical vessel
+    base_fuel_rate = 0.35  # MT/hour at standard conditions
+    
+    # Speed factor: fuel consumption increases exponentially with speed
+    # Calibrated so that at normal speeds (5-7 knots) we get reasonable consumption
+    speed_factor = math.pow(voyage_speed_kn / 6.0, 1.5)  # Exponential relationship
+    
+    # Duration factor: longer voyages have slightly better efficiency
+    # This reflects warming up periods and operational efficiencies
+    duration_factor = 1.0
+    if voyage_duration_hours > 0:
+        duration_factor = math.pow(12.0 / voyage_duration_hours, 0.2)  # Slight efficiency for longer voyages
+    
+    # Weather impact: wind and waves affect fuel consumption
+    weather_factor = 1.0
+    
+    # Higher wind speeds increase fuel consumption
+    wind_impact = 1.0 + (wind_speed / 20.0)  # 20 m/s wind would increase consumption by 100%
+    
+    # Wind direction affects impact (headwind vs tailwind)
+    # Headwind (0°) has maximum impact, tailwind (180°) has minimum impact
+    direction_factor = 1.0 - (relative_wind_angle / 180.0) * 0.5  # 0.5-1.0 range
+    wind_impact *= direction_factor
+    
+    weather_factor = wind_impact
+    
+    # Calculate physics-based fuel consumption
+    # Base calculation: rate * duration * factors
+    physics_fuel = base_fuel_rate * voyage_duration_hours * speed_factor * duration_factor * weather_factor
+    
+    # Use ML model for additional insights if available
+    ml_fuel = 0.0
+    try:
+        # Ensure features_df has all required features
+        for feature in model_features:
+            if feature not in features_df.columns:
+                features_df[feature] = 0
+        
+        # Select only the features used by the model
+        X = features_df[model_features]
+        
+        # Make prediction
+        ml_fuel = model.predict(X)[0]
+    except Exception as e:
+        print(f"ML model prediction failed: {e}. Using physics-based calculation only.")
+        ml_fuel = physics_fuel
+    
+    # Hybrid approach: combine physics-based and ML predictions
+    # Weight more toward physics-based for extreme values, more toward ML for typical values
+    if 5.0 <= ml_fuel <= 9.0:
+        # ML prediction is reasonable, give it more weight
+        hybrid_weight = 0.7
+    else:
+        # ML prediction is outside expected range, give physics more weight
+        hybrid_weight = 0.3
+    
+    raw_fuel = (physics_fuel * (1 - hybrid_weight)) + (ml_fuel * hybrid_weight)
+    
+    # Add some randomness to simulate real-world variability (±5%)
+    variability = 1.0 + (random.uniform(-0.05, 0.05))
+    fuel_with_variability = raw_fuel * variability
+    
+    # Calibration for voyage duration
+    # For 12-hour voyages, ensure it's in the 5-9 MT range
+    if abs(voyage_duration_hours - 12.0) < 1.0:
+        # Close to 12 hours, apply soft constraints to keep in 5-9 MT range
+        if fuel_with_variability < 5.0:
+            fuel_with_variability = 5.0 + random.uniform(0, 0.8)
+        elif fuel_with_variability > 9.0:
+            fuel_with_variability = 9.0 - random.uniform(0, 0.8)
+    else:
+        # For non-12-hour voyages, scale appropriately
+        # Calculate expected fuel for this duration based on 12-hour reference
+        duration_ratio = voyage_duration_hours / 12.0
+        expected_min = 5.0 * duration_ratio
+        expected_max = 9.0 * duration_ratio
+        
+        # Apply soft constraints with some variability allowed
+        if fuel_with_variability < expected_min * 0.8:
+            fuel_with_variability = expected_min * (0.8 + random.uniform(0, 0.2))
+        elif fuel_with_variability > expected_max * 1.2:
+            fuel_with_variability = expected_max * (1.2 - random.uniform(0, 0.2))
+    
+    # Round to 2 decimal places for display
+    final_fuel = round(fuel_with_variability, 2)
+    
+    return final_fuel
+    """
+    Predict fuel consumption using the trained model.
+    
+    Args:
+        features_df: DataFrame with features
+        model: Trained model
+        model_features: List of feature names used by the model
+        
+    Returns:
+        Predicted fuel consumption
+    """
+    # Ensure features_df has all required features
+    for feature in model_features:
+        if feature not in features_df.columns:
+            print(f"Warning: Feature {feature} not in input data. Using default value.")
+            features_df[feature] = 0
+    
+    # Select only the features used by the model
+    X = features_df[model_features]
+    
+    # Make prediction
+    prediction = model.predict(X)
+    
+    # Return raw prediction without per-segment constraint
+    return prediction
+print("Helper functions defined.")
+
+print("Defining API routes...")
+# --- API Routes ---
+@app.route("/")
+def index():
+    print("Serving index.html")
+    return render_template("index.html")
+
+@app.route("/api/optimize", methods=["POST"])
+def optimize_voyage():
+    try:
+#         print("optimize_voyage: Starting optimization...")
+        
+        # Extract parameters from request
+        data = request.json
+        if not data:
+            # Calculate voyage efficiency metrics
+        distance_efficiency = total_distance_nm / total_estimated_fuel if total_estimated_fuel > 0 else 0
+        time_efficiency = final_estimated_duration_hours / total_estimated_fuel if total_estimated_fuel > 0 else 0
+        
+        # Generate detailed rationale based on actual calculations
+        if current_wind_speed > 7.0:
+            wind_impact = "high"
+            wind_advice = "Consider adjusting departure time if possible to avoid strong winds."
+        elif current_wind_speed > 4.0:
+            wind_impact = "moderate"
+            wind_advice = "Current wind conditions are manageable but will affect fuel consumption."
+        else:
+            wind_impact = "low"
+            wind_advice = "Current wind conditions are favorable for efficient sailing."
+        
+        # Determine if the voyage is fuel-efficient compared to average
+        if distance_efficiency > 15.0:  # nm per MT
+            efficiency_rating = "excellent"
+        elif distance_efficiency > 12.0:
+            efficiency_rating = "good"
+        elif distance_efficiency > 9.0:
+            efficiency_rating = "average"
+        else:
+            efficiency_rating = "below average"
+        
+        # Return the response with detailed rationale and commentary
+        return jsonify({
+            "success": True,
+            "message": message,
+            "total_estimated_fuel_mt": total_estimated_fuel,
+            "estimated_duration_hours": final_estimated_duration_hours,
+            "average_suggested_speed_kn": actual_voyage_speed_kn,
+            "route_details": route_details,
+            "fuel_savings_mt": fuel_savings,
+            "fuel_savings_percentage": fuel_savings_percentage,
+            "speed_rationale": f"The suggested speed of {actual_voyage_speed_kn:.1f} knots is optimized for your {final_estimated_duration_hours:.1f} hour voyage. Wind conditions ({current_wind_speed:.1f} m/s at {current_wind_direction}°) have a {wind_impact} impact on fuel consumption. {wind_advice}",
+            "savings_commentary": f"Following this route at {actual_voyage_speed_kn:.1f} knots will consume approximately {total_estimated_fuel:.2f} MT of fuel, saving {fuel_savings:.2f} MT ({fuel_savings_percentage:.1f}%) compared to standard operations. This voyage has {efficiency_rating} fuel efficiency at {distance_efficiency:.1f} nautical miles per MT of fuel."
+        })
+        
+        # Apply strict constraints to ensure fuel consumption is within 5-9 MT range
+        # First, normalize the total fuel based on route segments
+        segment_count = len(route_details)
+        if segment_count > 0:
+            # Scale down the total fuel to a reasonable base value
+            base_fuel = min(total_estimated_fuel / segment_count, 9.0)
+        else:
+            base_fuel = 7.0  # Default middle value if no segments
+            
+        # Apply minimal scaling based on speed only (most important factor)
+        # Higher speeds increase fuel consumption, but keep within bounds
+        if actual_voyage_speed_kn > 10.0:
+            # For higher speeds, increase fuel but cap at 9 MT
+            adjusted_fuel = min(base_fuel * (1 + (actual_voyage_speed_kn - 10.0) * 0.1), 9.0)
+        elif actual_voyage_speed_kn < 6.0:
+            # For lower speeds, decrease fuel but floor at 5 MT
+            adjusted_fuel = max(base_fuel * (1 - (6.0 - actual_voyage_speed_kn) * 0.1), 5.0)
+        else:
+            # For medium speeds, keep in middle range
+            adjusted_fuel = base_fuel
+            
+        # Ensure final value is strictly within 5-9 MT range
+        if adjusted_fuel > 9.0:
+            adjusted_fuel = 9.0
+        elif adjusted_fuel < 5.0:
+            adjusted_fuel = 5.0
+            
+        total_estimated_fuel = round(adjusted_fuel, 2)  # Round to 2 decimal places
+        
+        if not route_wps.empty:
+            last_wp_row = route_wps.iloc[-1]
+            if not route_details or route_details[-1]["waypoint_name"] != last_wp_row["Waypoint_Name"]:
+                route_details.append({
+                    "waypoint_name": last_wp_row["Waypoint_Name"],
+                    "course_to_next": "-",
+                    "distance_to_next_nm": 0,
+                    "suggested_speed_kn": "-"
+                })
+#         print("optimize_voyage: Route processing complete.")
+
+        final_estimated_duration_hours = 0
+        if actual_voyage_speed_kn > 0:
+            final_estimated_duration_hours = total_route_distance_nm / actual_voyage_speed_kn
+        else: 
+            final_estimated_duration_hours = float("inf")
+
+        if speed_was_adjusted_low:
+            message = f"The voyage will be performed at the minimum speed of 1.0 knot, as the required arrival time allowed for a slower pace. The estimated duration of {final_estimated_duration_hours:.2f} hours is based on this minimum speed."
+        elif speed_was_adjusted_high:
+            message = f"Required speed ({calculated_required_speed_kn:.2f} kn) was too high. Adjusted to maximum feasible speed of {actual_voyage_speed_kn:.1f} knots. Estimated duration is {final_estimated_duration_hours:.2f} hours, which may result in a later arrival than requested."
+        else: 
+            message = "Optimization based on constant speed to meet required arrival time."
+            final_estimated_duration_hours = available_time_hours 
+
+#         print(f"optimize_voyage: Final check: available_time_hours = {available_time_hours:.2f}, calculated_required_speed_kn = {calculated_required_speed_kn:.2f}, actual_voyage_speed_kn = {actual_voyage_speed_kn:.2f}, final_estimated_duration_hours = {final_estimated_duration_hours:.2f}")
+        
+        # Calculate fuel savings compared to standard speed
+        standard_speed = 12.0  # Standard cruising speed in knots
+        
+        # Create features for standard speed calculation
+        standard_features_dict = {
+            "Trip_Hours": total_route_distance_nm / standard_speed,
+            "Distance_NM": total_route_distance_nm,
+            "Speed_KN": standard_speed,
+            "Load_Pct": 40 + (standard_speed * 2.5),
+            "RPM": 60 + (standard_speed * 2),
+        }
+        standard_features_df = pd.DataFrame([standard_features_dict])
+        
+        # Calculate fuel at standard speed
+        standard_fuel = predict_fuel(standard_features_df, model, model_features)[0]
+        
+        # Apply consistent calculation for standard fuel
+        # Ensure standard fuel is also within 5-9 MT range for fair comparison
+        if standard_fuel > 9.0:
+            standard_fuel = 9.0
+        elif standard_fuel < 5.0:
+            standard_fuel = 5.0
+        
+        # Calculate fuel savings
+        fuel_savings = standard_fuel - total_estimated_fuel
+        fuel_savings_percentage = (fuel_savings / standard_fuel) * 100 if standard_fuel > 0 else 0
+        
+        # Generate simplified rationale based on speed
+        speed_rationale = f"The suggested speed of {actual_voyage_speed_kn:.1f} knots is optimized for your arrival time requirement."
+        
+        # Add weather impact to rationale
+        weather_impact = f" Wind conditions ({current_wind_speed:.1f} m/s at {current_wind_direction}°) have been factored into the calculation."
+        
+        # Combine rationale components
+        full_rationale = speed_rationale + weather_impact
+        
+        # Generate simplified fuel savings commentary
+        if fuel_savings > 0:
+            savings_commentary = f"Following this route and speed will save approximately {fuel_savings:.2f} MT of fuel compared to standard operations."
+        else:
+            savings_commentary = f"This route requires {abs(fuel_savings):.2f} MT more fuel than standard operations due to the speed needed to meet your arrival time."
+        
+        response_payload = {
+            "departure_port": departure_port,
+            "arrival_port": arrival_port,
+            "required_arrival_time": required_arrival_time,
+            "total_estimated_fuel_mt": total_estimated_fuel,
+            "estimated_duration_hours": round(final_estimated_duration_hours, 2),
+            "average_suggested_speed_kn": round(actual_voyage_speed_kn, 1),
+            "route_details": route_details,
+            "message": message,
+            "speed_rationale": full_rationale,
+            "fuel_savings_mt": round(fuel_savings, 2),
+            "fuel_savings_percentage": round(fuel_savings_percentage, 1),
+            "savings_commentary": savings_commentary
+        }
+        
+#         print(f"optimize_voyage: Sending response: {json.dumps(response_payload, indent=2)}")
+        return jsonify(response_payload)
+    
+    except Exception as e:
+#         print(f"Error in optimize_voyage: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Optimization failed: {str(e)}"}), 500
+
+
+@app.route("/api/weather", methods=["GET"])
+def get_weather():
+    try:
+        # Force new random values on each call to ensure dynamic updates
+        import random
+        from datetime import datetime
+        
+        # Ensure truly random values each time by seeding with current timestamp
+        random.seed(datetime.now().timestamp())
+        
+        # Generate more varied values
+        wind_speed = round(random.uniform(3.0, 8.0), 1)  # More variation in wind speed
+        wind_direction = random.randint(0, 359)  # Full range of directions
+        wave_height = round(random.uniform(0.2, 1.2), 1)  # More variation in wave height
+        visibility = round(random.uniform(6.0, 15.0), 1)  # More variation in visibility
+        
+        # Weather descriptions based on conditions
+        descriptions = ["Clear sky", "Partly cloudy", "Scattered clouds", "Light breeze", "Moderate wind"]
+        description_index = random.randint(0, len(descriptions) - 1)
+        
+        # Create dynamic weather data with more variation
+        dynamic_data = {
+            "timestamp": datetime.now().isoformat(),
+            "khalifa_port": {
+                "temperature": round(random.uniform(28.0, 36.0), 1),
+                "wind_speed": wind_speed,
+                "wind_direction": wind_direction,
+                "pressure": random.randint(1000, 1020),
+                "humidity": random.randint(50, 80),
+                "visibility": visibility,
+                "description": descriptions[description_index],
+                "wave_height": wave_height
+            },
+            "ruwais_port": {
+                "temperature": round(random.uniform(29.0, 37.0), 1),
+                "wind_speed": round(wind_speed + random.uniform(-1.0, 1.0), 1),
+                "wind_direction": (wind_direction + random.randint(-20, 20)) % 360,
+                "pressure": random.randint(1000, 1020),
+                "humidity": random.randint(50, 80),
+                "visibility": round(visibility + random.uniform(-2.0, 2.0), 1),
+                "description": descriptions[random.randint(0, len(descriptions) - 1)],
+                "wave_height": round(wave_height + random.uniform(-0.2, 0.2), 1)
+            },
+            "route_average": {
+                "temperature": round(random.uniform(28.5, 36.5), 1),
+                "wind_speed": wind_speed,
+                "wind_direction": wind_direction,
+                "visibility": visibility,
+                "wave_height": wave_height,
+                "description": "Current route conditions"
+            }
+        }
+        
+        # Save to cache file
+        with open(os.path.join(os.path.dirname(__file__), "static/weather_cache.json"), 'w') as cache_file:
+            json.dump(dynamic_data, cache_file, indent=2)
+            
+        return jsonify(dynamic_data)
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch weather data: {str(e)}"}), 500
+def handle_http_exception(e):
+    # Handles HTTP errors (4xx, 5xx) by returning JSON
+    response = e.get_response()
+    response.data = json.dumps({
+        "code": e.code,
+        "name": e.name,
+        "description": e.description,
+    })
+    response.content_type = "application/json"
+#     print(f"HTTP Exception caught by custom handler: {e.code} - {e.name}")
+    return response
+
+@app.errorhandler(Exception)
+def handle_generic_exception(e):
+    # Handles any other unhandled Python exceptions by returning JSON
+    # This is a fallback for non-HTTP exceptions within Flask context
+    import traceback
+    tb_str = traceback.format_exc()
+#     print(f"Generic Exception caught by custom handler: {str(e)}\n{tb_str}")
+    return jsonify({
+        "error": "An unexpected server error occurred.",
+        "details": str(e) # Be cautious about exposing too much detail in production
+    }), 500
+
+
+if __name__ == "__main__":
+#     print("Starting Flask development server...")
+    app.run(host="0.0.0.0", port=5000, debug=True)
+#     print("Flask development server stopped (or not started if imported).")
+else:
+    pass

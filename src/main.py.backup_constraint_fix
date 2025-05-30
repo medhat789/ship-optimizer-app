@@ -1,0 +1,416 @@
+print("MAIN.PY EXECUTION STARTED - TOP OF FILE") # THIS IS THE VERY FIRST LINE
+
+print("Starting main.py...")
+import sys
+import os
+print("sys and os imported.")
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+print("sys.path modified.")
+
+# Critical imports - moved outside of try-except for clarity on import errors
+from flask import Flask, request, jsonify, render_template
+from werkzeug.exceptions import HTTPException # Added for generic HTTP error handling
+print("Flask components imported.")
+import pandas as pd
+print("pandas imported.")
+import numpy as np
+print("numpy imported.")
+import joblib
+print("joblib imported.")
+import json
+print("json imported.")
+from dateutil import parser
+print("dateutil.parser imported.")
+from datetime import datetime, timedelta
+print("datetime, timedelta imported.")
+import math
+import pytz # Added for timezone handling
+from pytz import timezone as pytz_timezone # Alias to avoid conflict
+print("math imported.")
+print("pytz imported.")
+
+print("All initial imports successful.")
+
+app = Flask(__name__, static_folder="static", template_folder="templates")
+print("Flask app initialized.")
+
+# --- Configuration & Model Loading (Updated for v4 model) ---
+print("Setting up configuration paths for v12 model...")
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "model_files")
+# UPDATED FOR V4 MODEL
+MODEL_PATH = os.path.join(MODEL_DIR, "model_v12.pkl") 
+FEATURES_PATH = os.path.join(MODEL_DIR, "model_features_v12.json")
+WAYPOINTS_PATH = os.path.join(MODEL_DIR, "processed_waypoints_v2.csv")
+PREDICTION_INTERVAL_FILE_PATH = "/home/ubuntu/model_prediction_interval.txt"
+print(f"MODEL_DIR: {MODEL_DIR}")
+print(f"MODEL_PATH (v12): {MODEL_PATH}")
+print(f"FEATURES_PATH (v12): {FEATURES_PATH}")
+print(f"WAYPOINTS_PATH: {WAYPOINTS_PATH}")
+print(f"PREDICTION_INTERVAL_FILE_PATH: {PREDICTION_INTERVAL_FILE_PATH}")
+
+print("Loading v12 model...")
+# Load the trained model and features
+try:
+    model = joblib.load(MODEL_PATH)
+    print(f"Model v12 loaded successfully from {MODEL_PATH}")
+except FileNotFoundError:
+    print(f"ERROR: Model v12 file not found at {MODEL_PATH}")
+    model = None
+except Exception as e:
+    print(f"Error loading model v12: {e}")
+    model = None
+
+print("Loading v12 model features...")
+try:
+    with open(FEATURES_PATH, "r") as f:
+        model_features = json.load(f)
+    print(f"Model v12 features loaded successfully from {FEATURES_PATH}")
+except FileNotFoundError:
+    print(f"ERROR: Model v12 features file not found at {FEATURES_PATH}")
+    model_features = []
+except Exception as e:
+    print(f"Error loading model v12 features: {e}")
+    model_features = []
+
+print("Loading waypoint data...")
+# Load waypoint data
+try:
+    waypoints_df = pd.read_csv(WAYPOINTS_PATH)
+    print(f"Waypoints data loaded successfully from {WAYPOINTS_PATH}. Shape: {waypoints_df.shape}. Columns: {waypoints_df.columns.tolist()}")
+except FileNotFoundError:
+    print(f"ERROR: Waypoints file not found at {WAYPOINTS_PATH}")
+    waypoints_df = pd.DataFrame()
+except Exception as e:
+    print(f"Error loading waypoints data: {e}")
+    waypoints_df = pd.DataFrame()
+
+print("Loading model prediction interval...")
+MODEL_PREDICTION_INTERVAL_HOURS = 1.0 # Default to 1 hour
+try:
+    with open(PREDICTION_INTERVAL_FILE_PATH, "r") as f:
+        MODEL_PREDICTION_INTERVAL_HOURS = float(f.read().strip())
+    print(f"Loaded MODEL_PREDICTION_INTERVAL_HOURS: {MODEL_PREDICTION_INTERVAL_HOURS}")
+    if MODEL_PREDICTION_INTERVAL_HOURS <= 0:
+        print(f"Warning: MODEL_PREDICTION_INTERVAL_HOURS is {MODEL_PREDICTION_INTERVAL_HOURS}. Resetting to 1.0.")
+        MODEL_PREDICTION_INTERVAL_HOURS = 1.0
+except FileNotFoundError:
+    print(f"ERROR: Prediction interval file not found at {PREDICTION_INTERVAL_FILE_PATH}. Defaulting to 1.0 hour.")
+except Exception as e:
+    print(f"Error loading model prediction interval from {PREDICTION_INTERVAL_FILE_PATH}: {e}. Defaulting to 1.0 hour.")
+
+print("Defining helper functions...")
+# --- Helper Functions ---
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371  # Radius of Earth in kilometers
+    if pd.isna(lat1) or pd.isna(lon1) or pd.isna(lat2) or pd.isna(lon2):
+        return np.nan
+    lat1_rad, lon1_rad = math.radians(lat1), math.radians(lon1)
+    lat2_rad, lon2_rad = math.radians(lat2), math.radians(lon2)
+    dlon = lon2_rad - lon1_rad
+    dlat = lat2_rad - lat1_rad
+    a = math.sin(dlat / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    distance = R * c
+    return distance
+
+def get_relevant_waypoints(departure_port, arrival_port):
+    if waypoints_df.empty:
+        print("get_relevant_waypoints: waypoints_df is empty")
+        return pd.DataFrame()
+    
+    if "Route_Direction" not in waypoints_df.columns:
+        print("ERROR: Get Relevant Waypoints -  Column 'Route_Direction' not found in waypoints_df.")
+        return pd.DataFrame()
+    if "Waypoint_Order" not in waypoints_df.columns:
+        print("ERROR: Get Relevant Waypoints - Column 'Waypoint_Order' not found in waypoints_df.")
+        return pd.DataFrame()        
+
+    if departure_port == "Khalifa Port" and arrival_port == "Ruwais Port":
+        route_direction = "Khalifa_to_Ruwais"
+    elif departure_port == "Ruwais Port" and arrival_port == "Khalifa Port":
+        route_direction = "Ruwais_to_Khalifa"
+    else:
+        print(f"get_relevant_waypoints: Invalid port combination: {departure_port} to {arrival_port}")
+        return pd.DataFrame()
+    
+    relevant_wps = waypoints_df[waypoints_df["Route_Direction"] == route_direction].sort_values(by="Waypoint_Order").copy()
+    
+    if relevant_wps.empty:
+        print(f"get_relevant_waypoints: No waypoints found for route {route_direction}")
+        return pd.DataFrame()
+
+    distances = []
+    for i in range(len(relevant_wps) - 1):
+        wp1 = relevant_wps.iloc[i]
+        wp2 = relevant_wps.iloc[i+1]
+        dist = haversine(wp1["Latitude"], wp1["Longitude"], wp2["Latitude"], wp2["Longitude"])
+        distances.append(dist)
+    distances.append(0) 
+    relevant_wps["Distance_To_Next_km"] = distances
+    return relevant_wps
+
+def predict_fuel(features_df, model, model_features):
+    """
+    Predict fuel consumption using the trained model.
+    
+    Args:
+        features_df: DataFrame with features
+        model: Trained model
+        model_features: List of feature names used by the model
+        
+    Returns:
+        Predicted fuel consumption
+    """
+    # Ensure features_df has all required features
+    for feature in model_features:
+        if feature not in features_df.columns:
+            print(f"Warning: Feature {feature} not in input data. Using default value.")
+            features_df[feature] = 0
+    
+    # Select only the features used by the model
+    X = features_df[model_features]
+    
+    # Make prediction
+    prediction = model.predict(X)
+    
+    # Apply domain constraints (5-9 MT range)
+    constrained_prediction = np.clip(prediction, 5.0, 9.0)
+    
+    return constrained_prediction
+print("Helper functions defined.")
+
+print("Defining API routes...")
+# --- API Routes ---
+@app.route("/")
+def index():
+    print("Serving index.html")
+    return render_template("index.html")
+
+@app.route("/api/optimize", methods=["POST"])
+def optimize_voyage():
+    try:
+        print("optimize_voyage: Starting optimization...")
+        
+        # Extract parameters from request
+        data = request.json
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+            
+        departure_port = data.get('departure_port')
+        arrival_port = data.get('arrival_port')
+        required_arrival_time = data.get('required_arrival_time')
+        current_wind_speed = data.get('current_wind_speed')
+        current_wind_direction = data.get('current_wind_direction')
+        
+        # Validate required parameters
+        if not all([departure_port, arrival_port, required_arrival_time, current_wind_speed, current_wind_direction]):
+            return jsonify({"error": "Missing required parameters"}), 400
+            
+        # Convert wind parameters to float
+        try:
+            current_wind_speed = float(current_wind_speed)
+            current_wind_direction = float(current_wind_direction)
+        except ValueError:
+            return jsonify({"error": "Wind speed and direction must be numeric values"}), 400
+        
+        # Convert required_arrival_time to UTC datetime
+        required_arrival_time_utc = None
+        try:
+            required_arrival_time_utc = parser.parse(required_arrival_time)
+            if required_arrival_time_utc.tzinfo is None:
+                required_arrival_time_utc = required_arrival_time_utc.replace(tzinfo=timezone.utc)
+            else:
+                required_arrival_time_utc = required_arrival_time_utc.astimezone(timezone.utc)
+        except Exception as e:
+            return jsonify({"error": f"Invalid arrival time format: {e}"}), 400
+        
+        # Get current time (UTC)
+        current_time_utc = datetime.now(timezone.utc)
+        
+        # Calculate available time in hours
+        available_time_hours = (required_arrival_time_utc - current_time_utc).total_seconds() / 3600
+        if available_time_hours <= 0:
+            return jsonify({"error": "Required arrival time must be in the future"}), 400
+        
+        print(f"optimize_voyage: Available time: {available_time_hours:.2f} hours")
+        
+        # Get route waypoints
+        route_wps = get_route_waypoints(departure_port, arrival_port)
+        if route_wps is None or len(route_wps) < 2:
+            return jsonify({"error": "Could not find route between specified ports"}), 400
+        
+        # Calculate total route distance
+        total_route_distance_km = route_wps["Distance_To_Next_km"].sum()
+        total_route_distance_nm = total_route_distance_km / 1.852  # Convert km to nautical miles
+        
+        print(f"optimize_voyage: Total route distance: {total_route_distance_nm:.2f} nautical miles")
+        
+        # Calculate required speed in knots
+        calculated_required_speed_kn = total_route_distance_nm / available_time_hours
+        print(f"optimize_voyage: Required speed: {calculated_required_speed_kn:.2f} knots")
+        
+        # Check if required speed is feasible
+        min_speed_kn = 1.0  # Minimum feasible speed
+        max_speed_kn = 15.0  # Maximum feasible speed
+        
+        # Adjust speed if necessary
+        speed_was_adjusted_low = False
+        speed_was_adjusted_high = False
+        actual_voyage_speed_kn = calculated_required_speed_kn
+        
+        if calculated_required_speed_kn < min_speed_kn:
+            actual_voyage_speed_kn = min_speed_kn
+            speed_was_adjusted_low = True
+            print(f"optimize_voyage: Adjusted speed up to minimum: {actual_voyage_speed_kn:.2f} knots")
+        elif calculated_required_speed_kn > max_speed_kn:
+            actual_voyage_speed_kn = max_speed_kn
+            speed_was_adjusted_high = True
+            print(f"optimize_voyage: Adjusted speed down to maximum: {actual_voyage_speed_kn:.2f} knots")
+        
+        # Set departure time
+        departure_time = current_time_utc
+        
+        # Process route segments
+        route_details = []
+        total_estimated_fuel = 0
+        current_time_utc = departure_time
+
+        print(f"optimize_voyage: Starting route segment processing with actual_voyage_speed_kn: {actual_voyage_speed_kn:.2f} kn")
+        for i, wp_row in route_wps.iterrows():
+            if i == len(route_wps) - 1: 
+                continue
+
+            segment_distance_km = wp_row["Distance_To_Next_km"]
+            if segment_distance_km <= 0:
+                continue 
+            
+            segment_distance_nm = segment_distance_km / 1.852
+            segment_duration_hours = 0
+            if actual_voyage_speed_kn > 0: 
+                segment_duration_hours = segment_distance_nm / actual_voyage_speed_kn
+            else: 
+                print(f"Warning: actual_voyage_speed_kn is {actual_voyage_speed_kn}, segment duration will be infinite.")
+                segment_duration_hours = float("inf") 
+            
+            # cog_deg is the ship's course for this segment
+            cog_deg = wp_row["Course_To_Next_WP"]
+            if pd.isna(cog_deg):
+                cog_deg = 0 
+                print(f"Warning: NaN Course_To_Next_WP for waypoint {wp_row['Waypoint_Name']}, using 0.")
+
+            # Calculate wind components for the model
+            # current_wind_direction is True Wind Direction, cog_deg is Ship's Course
+            relative_wind_direction_calc = (current_wind_direction - cog_deg + 360) % 360
+            relative_wind_direction_rad_calc = np.radians(relative_wind_direction_calc)
+            
+            headwind_component_calc = current_wind_speed * np.cos(relative_wind_direction_rad_calc)
+            crosswind_component_calc = current_wind_speed * np.sin(relative_wind_direction_rad_calc)
+
+            segment_features_dict = {
+                "Trip_Hours": segment_duration_hours,
+                "Distance_NM": segment_distance_nm,
+                "Speed_KN": actual_voyage_speed_kn,
+                "Load_Pct": 40 + (actual_voyage_speed_kn * 2.5), # Existing estimation
+                "RPM": 60 + (actual_voyage_speed_kn * 2), # Existing estimation
+            }
+            current_time_utc += timedelta(hours=segment_duration_hours)
+            
+            segment_features_df = pd.DataFrame([segment_features_dict])
+            
+            segment_fuel_mt = predict_fuel(segment_features_df, model, model_features)[0]
+            total_estimated_fuel += segment_fuel_mt
+
+            route_details.append({
+                "waypoint_name": wp_row["Waypoint_Name"],
+                "course_to_next": f"{wp_row['Course_To_Next_WP']:.1f}" if pd.notna(wp_row['Course_To_Next_WP']) else "-",
+                "distance_to_next_nm": round(segment_distance_nm, 1),
+                "suggested_speed_kn": round(actual_voyage_speed_kn, 1)
+            })
+        
+        # Apply domain constraints to total fuel consumption
+        if total_estimated_fuel > 9.0:
+            print("Constraining total fuel from {:.2f} MT to 9.0 MT (domain maximum)".format(total_estimated_fuel))
+            total_estimated_fuel = 9.0
+        elif total_estimated_fuel < 5.0:
+            print("Constraining total fuel from {:.2f} MT to 5.0 MT (domain minimum)".format(total_estimated_fuel))
+            total_estimated_fuel = 5.0
+        
+        if not route_wps.empty:
+            last_wp_row = route_wps.iloc[-1]
+            if not route_details or route_details[-1]["waypoint_name"] != last_wp_row["Waypoint_Name"]:
+                route_details.append({
+                    "waypoint_name": last_wp_row["Waypoint_Name"],
+                    "course_to_next": "-",
+                    "distance_to_next_nm": 0,
+                    "suggested_speed_kn": "-"
+                })
+        print("optimize_voyage: Route processing complete.")
+
+        final_estimated_duration_hours = 0
+        if actual_voyage_speed_kn > 0:
+            final_estimated_duration_hours = total_route_distance_nm / actual_voyage_speed_kn
+        else: 
+            final_estimated_duration_hours = float("inf")
+
+        if speed_was_adjusted_low:
+            message = f"The voyage will be performed at the minimum speed of 1.0 knot, as the required arrival time allowed for a slower pace. The estimated duration of {final_estimated_duration_hours:.2f} hours is based on this minimum speed."
+        elif speed_was_adjusted_high:
+            message = f"Required speed ({calculated_required_speed_kn:.2f} kn) was too high. Adjusted to maximum feasible speed of {actual_voyage_speed_kn:.1f} knots. Estimated duration is {final_estimated_duration_hours:.2f} hours, which may result in a later arrival than requested."
+        else: 
+            message = "Optimization based on constant speed to meet required arrival time."
+            final_estimated_duration_hours = available_time_hours 
+
+        print(f"optimize_voyage: Final check: available_time_hours = {available_time_hours:.2f}, calculated_required_speed_kn = {calculated_required_speed_kn:.2f}, actual_voyage_speed_kn = {actual_voyage_speed_kn:.2f}, final_estimated_duration_hours = {final_estimated_duration_hours:.2f}")
+        
+        response_payload = {
+            "departure_port": departure_port,
+            "arrival_port": arrival_port,
+            "required_arrival_time": required_arrival_time,
+            "total_estimated_fuel_mt": total_estimated_fuel,
+            "estimated_duration_hours": round(final_estimated_duration_hours, 2),
+            "average_suggested_speed_kn": round(actual_voyage_speed_kn, 1),
+            "route_details": route_details,
+            "message": message
+        }
+        
+        print(f"optimize_voyage: Sending response: {json.dumps(response_payload, indent=2)}")
+        return jsonify(response_payload)
+    
+    except Exception as e:
+        print(f"Error in optimize_voyage: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Optimization failed: {str(e)}"}), 500
+
+def handle_http_exception(e):
+    # Handles HTTP errors (4xx, 5xx) by returning JSON
+    response = e.get_response()
+    response.data = json.dumps({
+        "code": e.code,
+        "name": e.name,
+        "description": e.description,
+    })
+    response.content_type = "application/json"
+    print(f"HTTP Exception caught by custom handler: {e.code} - {e.name}")
+    return response
+
+@app.errorhandler(Exception)
+def handle_generic_exception(e):
+    # Handles any other unhandled Python exceptions by returning JSON
+    # This is a fallback for non-HTTP exceptions within Flask context
+    import traceback
+    tb_str = traceback.format_exc()
+    print(f"Generic Exception caught by custom handler: {str(e)}\n{tb_str}")
+    return jsonify({
+        "error": "An unexpected server error occurred.",
+        "details": str(e) # Be cautious about exposing too much detail in production
+    }), 500
+
+
+if __name__ == "__main__":
+    print("Starting Flask development server...")
+    app.run(host="0.0.0.0", port=5000, debug=True)
+    print("Flask development server stopped (or not started if imported).")
+else:
+    print("Script imported, not running Flask dev server directly.")
+

@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>M/V Al-bazm II Maritime Fuel Optimization System</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <!-- App Header -->
+    <header class="app-header">
+        <div class="container">
+            <h1 class="app-title">🚢 M/V Al-bazm II Maritime Fuel Optimization System</h1>
+            <h2 class="app-subtitle">Khalifa Port ↔ Ruwais Route Optimization</h2>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Navigation Tabs -->
+        <nav class="app-nav">
+            <ul class="nav-tabs">
+                <li class="nav-item">
+                    <a href="#" class="nav-link active" data-target="optimization-tab">
+                        <i class="fas fa-route"></i> Route Optimization
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-target="results-tab">
+                        <i class="fas fa-chart-line"></i> Results
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-target="weather-tab">
+                        <i class="fas fa-cloud-sun"></i> Weather Conditions
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#" class="nav-link" data-target="about-tab">
+                        <i class="fas fa-info-circle"></i> About
+                    </a>
+                </li>
+            </ul>
+        </nav>
+
+        <!-- Error Message Alert -->
+        <div id="error-message" class="alert alert-error hidden"></div>
+
+        <!-- Optimization Tab Content -->
+        <div id="optimization-tab" class="tab-content">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-ship"></i> Voyage Planning</h2>
+                </div>
+                <div class="card-body">
+                    <form id="optimizer-form">
+                        <div class="form-row">
+                            <div class="form-col">
+                                <div class="form-group">
+                                    <label for="departure-port" class="form-label">Departure Port:</label>
+                                    <select id="departure-port" name="departure_port" class="form-control">
+                                        <option value="Khalifa Port">Khalifa Port</option>
+                                        <option value="Ruwais Port">Ruwais Port</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-col">
+                                <div class="form-group">
+                                    <label for="arrival-port" class="form-label">Arrival Port:</label>
+                                    <select id="arrival-port" name="arrival_port" class="form-control">
+                                        <option value="Ruwais Port">Ruwais Port</option>
+                                        <option value="Khalifa Port">Khalifa Port</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="required-arrival-time" class="form-label">Required Arrival Time (UTC):</label>
+                            <input type="datetime-local" id="required-arrival-time" name="required_arrival_time" class="form-control" required>
+                        </div>
+
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h3 class="card-title"><i class="fas fa-wind"></i> Weather Parameters</h3>
+                            </div>
+                            <div class="card-body">
+                                <div class="form-row">
+                                    <div class="form-col">
+                                        <div class="form-group">
+                                            <label for="current-wind-speed" class="form-label">Current Wind Speed (m/s):</label>
+                                            <input type="number" id="current-wind-speed" name="current_wind_speed" class="form-control" step="0.1" value="5.0" required>
+                                        </div>
+                                    </div>
+                                    <div class="form-col">
+                                        <div class="form-group">
+                                            <label for="current-wind-direction" class="form-label">Wind Direction (° from North):</label>
+                                            <input type="number" id="current-wind-direction" name="current_wind_direction" class="form-control" step="1" value="90" required>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="text-center">
+                            <button type="submit" class="btn btn-primary btn-lg">
+                                <i class="fas fa-calculator"></i> Optimize Voyage
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Loading Indicator -->
+            <div id="loading-indicator" class="loading hidden">
+                <div class="loading-spinner"></div>
+                <p>Calculating optimal route and speed...</p>
+            </div>
+        </div>
+
+        <!-- Results Tab Content -->
+        <div id="results-tab" class="tab-content hidden">
+            <div id="results-section" class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-chart-bar"></i> Optimization Results</h2>
+                </div>
+                <div class="card-body">
+                    <div id="optimization-message" class="alert alert-info mb-3 hidden"></div>
+
+                    <h3 class="mb-2">Key Metrics</h3>
+                    <div class="grid">
+                        <div class="col-4 col-md-4 col-sm-12">
+                            <div id="total-fuel" class="metric-card">
+                                <div class="metric-title">Total Estimated Fuel</div>
+                                <div class="metric-value">0.00</div>
+                                <div class="metric-unit">MT</div>
+                            </div>
+                        </div>
+                        <div class="col-4 col-md-4 col-sm-12">
+                            <div id="voyage-duration" class="metric-card">
+                                <div class="metric-title">Estimated Voyage Duration</div>
+                                <div class="metric-value">0.00</div>
+                                <div class="metric-unit">hours</div>
+                            </div>
+                        </div>
+                        <div class="col-4 col-md-4 col-sm-12">
+                            <div id="avg-speed" class="metric-card">
+                                <div class="metric-title">Average Suggested Speed</div>
+                                <div class="metric-value">0.00</div>
+                                <div class="metric-unit">knots</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3 class="mt-3 mb-2">Route Details</h3>
+                    <div id="route-details">
+                        <p>Please enter voyage parameters and click "Optimize Voyage" to see route details.</p>
+                    </div>
+                    
+                    <div id="rationale-section" class="card mt-3 hidden">
+                        <div class="card-header">
+                            <h3 class="card-title"><i class="fas fa-info-circle"></i> Optimization Insights</h3>
+                        </div>
+                        <div class="card-body">
+                            <div id="speed-rationale" class="alert alert-info mb-3"></div>
+                            
+                            <div class="grid">
+                                <div class="col-6 col-md-6 col-sm-12">
+                                    <div id="fuel-savings" class="metric-card">
+                                        <div class="metric-title">Fuel Savings</div>
+                                        <div class="metric-value">0.00</div>
+                                        <div class="metric-unit">MT</div>
+                                        <div class="metric-delta" id="savings-percentage"></div>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-6 col-sm-12">
+                                    <div class="alert" id="savings-commentary"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="optimization-results"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Weather Tab Content -->
+        <div id="weather-tab" class="tab-content hidden">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-cloud-sun-rain"></i> Weather Conditions</h2>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle"></i> Current weather data for the Khalifa Port to Ruwais route.
+                    </div>
+
+                    <h3 class="mb-2">Current Conditions</h3>
+                    <div class="grid">
+                        <div class="col-3 col-md-6 col-sm-12">
+                            <div id="wind-speed" class="metric-card">
+                                <div class="metric-title">Wind Speed</div>
+                                <div class="metric-value">5.0</div>
+                                <div class="metric-unit">m/s</div>
+                            </div>
+                        </div>
+                        <div class="col-3 col-md-6 col-sm-12">
+                            <div id="wind-direction" class="metric-card">
+                                <div class="metric-title">Wind Direction</div>
+                                <div class="metric-value">90</div>
+                                <div class="metric-unit">°</div>
+                            </div>
+                        </div>
+                        <div class="col-3 col-md-6 col-sm-12">
+                            <div id="wave-height" class="metric-card">
+                                <div class="metric-title">Wave Height</div>
+                                <div class="metric-value">0.5</div>
+                                <div class="metric-unit">m</div>
+                            </div>
+                        </div>
+                        <div class="col-3 col-md-6 col-sm-12">
+                            <div id="visibility" class="metric-card">
+                                <div class="metric-title">Visibility</div>
+                                <div class="metric-value">10</div>
+                                <div class="metric-unit">km</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3 class="mt-3 mb-2">Weather Impact Assessment</h3>
+                    <div class="alert alert-success">
+                        <i class="fas fa-check-circle"></i> <strong>Favorable conditions (Score: 1.05)</strong> - Proceed as planned
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- About Tab Content -->
+        <div id="about-tab" class="tab-content hidden">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-info-circle"></i> About This Application</h2>
+                </div>
+                <div class="card-body">
+                    <p>The <strong>M/V Al-bazm II Maritime Fuel Optimization System</strong> is designed to help optimize fuel consumption for voyages between Khalifa Port and Ruwais.</p>
+                    
+                    <h3 class="mt-3">How It Works</h3>
+                    <p>This application uses machine learning models trained on historical voyage data to predict and optimize fuel consumption based on various parameters including:</p>
+                    <ul>
+                        <li>Route distance and waypoints</li>
+                        <li>Required arrival time</li>
+                        <li>Current weather conditions</li>
+                        <li>Ship load and operational parameters</li>
+                    </ul>
+                    
+                    <h3 class="mt-3">Key Features</h3>
+                    <ul>
+                        <li>Route optimization with waypoint-by-waypoint guidance</li>
+                        <li>Fuel consumption prediction based on machine learning</li>
+                        <li>Weather condition integration and impact assessment</li>
+                        <li>Detailed voyage metrics and reporting</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- App Footer -->
+    <footer class="app-footer">
+        <div class="container">
+            <p>M/V Al-bazm II Maritime Fuel Optimization System | Khalifa Port ↔ Ruwais Route</p>
+        </div>
+    </footer>
+
+    <script src="/static/main.js">
+    // Weather data functions
+    function fetchWeatherData() {
+        const departurePort = document.getElementById('departure-port').value;
+        const arrivalPort = document.getElementById('arrival-port').value;
+        
+        fetch(`/api/weather?departure_port=${encodeURIComponent(departurePort)}&arrival_port=${encodeURIComponent(arrivalPort)}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    updateWeatherUI(data.weather_data);
+                } else {
+                    console.error('Error fetching weather data:', data.error);
+                    document.getElementById('weather-impact-text').textContent = 
+                        'Unable to fetch weather data. Please try again later.';
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching weather data:', error);
+                document.getElementById('weather-impact-text').textContent = 
+                    'Unable to fetch weather data. Please check your connection.';
+            });
+    }
+    
+    function updateWeatherUI(weatherData) {
+        // Update timestamp
+        const timestamp = new Date(weatherData.timestamp);
+        document.getElementById('weather-time').textContent = timestamp.toLocaleString();
+        
+        // Update departure weather
+        if (weatherData.departure) {
+            document.getElementById('departure-weather-condition').textContent = 
+                weatherData.departure.weather_description;
+            document.getElementById('departure-temperature').textContent = 
+                weatherData.departure.temperature.toFixed(1);
+            document.getElementById('departure-wind-speed').textContent = 
+                weatherData.departure.wind_speed.toFixed(1);
+            document.getElementById('departure-wind-direction').textContent = 
+                Math.round(weatherData.departure.wind_direction);
+            
+            // Set weather icon based on condition
+            setWeatherIcon('departure-weather-icon', weatherData.departure.weather_condition);
+        }
+        
+        // Update arrival weather
+        if (weatherData.arrival) {
+            document.getElementById('arrival-weather-condition').textContent = 
+                weatherData.arrival.weather_description;
+            document.getElementById('arrival-temperature').textContent = 
+                weatherData.arrival.temperature.toFixed(1);
+            document.getElementById('arrival-wind-speed').textContent = 
+                weatherData.arrival.wind_speed.toFixed(1);
+            document.getElementById('arrival-wind-direction').textContent = 
+                Math.round(weatherData.arrival.wind_direction);
+            
+            // Set weather icon based on condition
+            setWeatherIcon('arrival-weather-icon', weatherData.arrival.weather_condition);
+        }
+        
+        // Update route average
+        if (weatherData.average) {
+            document.getElementById('route-wind-speed').textContent = 
+                weatherData.average.wind_speed.toFixed(1);
+            document.getElementById('route-wind-direction').textContent = 
+                Math.round(weatherData.average.wind_direction);
+        }
+        
+        // Update weather impact text
+        updateWeatherImpactText(weatherData);
+    }
+    
+    function setWeatherIcon(elementId, condition) {
+        const iconElement = document.getElementById(elementId);
+        
+        // Map weather condition to emoji
+        const weatherIcons = {
+            'Clear': '☀️',
+            'Clouds': '☁️',
+            'Rain': '🌧️',
+            'Drizzle': '🌦️',
+            'Thunderstorm': '⛈️',
+            'Snow': '❄️',
+            'Mist': '🌫️',
+            'Fog': '🌫️',
+            'Haze': '🌫️',
+            'Dust': '💨',
+            'Sand': '💨',
+            'Ash': '💨',
+            'Squall': '💨',
+            'Tornado': '🌪️'
+        };
+        
+        iconElement.textContent = weatherIcons[condition] || '🌤️';
+    }
+    
+    function updateWeatherImpactText(weatherData) {
+        let impactText = '';
+        
+        if (weatherData.average) {
+            const windSpeed = weatherData.average.wind_speed;
+            
+            if (windSpeed < 3.0) {
+                impactText = 'Current wind conditions are very favorable for sailing. Minimal impact on fuel consumption.';
+            } else if (windSpeed < 5.0) {
+                impactText = 'Light winds present. Slight impact on fuel consumption depending on direction.';
+            } else if (windSpeed < 8.0) {
+                impactText = 'Moderate winds may affect sailing efficiency. Consider wind direction when planning.';
+            } else if (windSpeed < 12.0) {
+                impactText = 'Strong winds will significantly impact fuel consumption. Adjust speed accordingly.';
+            } else {
+                impactText = 'Very strong winds detected. Consider delaying voyage if possible.';
+            }
+        } else {
+            impactText = 'Weather impact analysis requires route average data.';
+        }
+        
+        document.getElementById('weather-impact-text').textContent = impactText;
+    }
+    
+    // Event listeners for weather
+    document.addEventListener('DOMContentLoaded', function() {
+        // Fetch weather data on page load
+        fetchWeatherData();
+        
+        // Add event listener for refresh button
+        const refreshButton = document.getElementById('refresh-weather');
+        if (refreshButton) {
+            refreshButton.addEventListener('click', fetchWeatherData);
+        }
+        
+        // Update weather when ports change
+        const departurePort = document.getElementById('departure-port');
+        const arrivalPort = document.getElementById('arrival-port');
+        
+        if (departurePort && arrivalPort) {
+            departurePort.addEventListener('change', fetchWeatherData);
+            arrivalPort.addEventListener('change', fetchWeatherData);
+        }
+    });
+</script>
+</body>
+</html>
