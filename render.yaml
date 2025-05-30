@@ -3,7 +3,10 @@ services:
     name: ship-optimizer-app
     env: python
     runtime: python3.11 # Matches runtime.txt
-    repo: https://github.com/medhat789/ship-optimizer-app # Replace with your GitHub repo URL
+ HEAD
+   
+    repo: https://github.com/YOUR_USERNAME/YOUR_REPO_NAME # Replace with your GitHub repo URL
+954839d (Update main.py and requirements.txt with timezone fix)
     branch: main # Or your default branch
     buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
     startCommand: "gunicorn --chdir src main:app --bind 0.0.0.0:$PORT"

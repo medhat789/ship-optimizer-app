@@ -6,16 +6,21 @@ Ship Optimizer Application - Main Flask Application with robust fallbacks
 from flask import Flask, request, jsonify, render_template
 import requests  # For OpenWeather API calls
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone # Added timezone
+import pytz
 import os
 import json
 import pickle
 import numpy as np
 import pandas as pd
 import random
+import logging # Added logging
 
 # Flask application setup
 app = Flask(__name__)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 # Model configuration
 MODEL_PREDICTION_INTERVAL_HOURS = 1
@@ -88,16 +93,16 @@ def get_weather_data(lat, lon):
                     # Estimate sea temperature
                     weather_data["sea_temperature"] = max(15, weather_data["temperature"] - 2.5)
             except Exception as e:
-                print(f"Error fetching sea temperature: {e}")
+                app.logger.error(f"Error fetching sea temperature: {e}")
                 # Estimate sea temperature
                 weather_data["sea_temperature"] = max(15, weather_data["temperature"] - 2.5)
                 
             return weather_data
         else:
-            print(f"Error fetching weather data: {response.status_code} - {response.text}")
+            app.logger.error(f"Error fetching weather data: {response.status_code} - {response.text}")
             # Fall back to mock data
     except Exception as e:
-        print(f"Exception fetching weather data: {e}")
+        app.logger.error(f"Exception fetching weather data: {e}")
         # Fall back to mock data
     
     # Generate mock weather data with some randomization for realism
@@ -121,7 +126,7 @@ def get_weather_data(lat, lon):
         "location_name": f"Near {lat:.2f}, {lon:.2f}"
     }
     
-    print(f"Using mock weather data for coordinates {lat}, {lon}")
+    app.logger.warning(f"Using mock weather data for coordinates {lat}, {lon}")
     return mock_data
 
 def get_route_weather(departure_port, arrival_port):
@@ -141,7 +146,7 @@ def get_route_weather(departure_port, arrival_port):
     elif departure_port == "Ruwais Port":
         departure_lat, departure_lon = RUWAIS_PORT_LAT, RUWAIS_PORT_LON
     else:
-        print(f"Unknown departure port: {departure_port}")
+        app.logger.error(f"Unknown departure port: {departure_port}")
         return {"error": "Unknown departure port"}
         
     if arrival_port == "Khalifa Port":
@@ -149,7 +154,7 @@ def get_route_weather(departure_port, arrival_port):
     elif arrival_port == "Ruwais Port":
         arrival_lat, arrival_lon = RUWAIS_PORT_LAT, RUWAIS_PORT_LON
     else:
-        print(f"Unknown arrival port: {arrival_port}")
+        app.logger.error(f"Unknown arrival port: {arrival_port}")
         return {"error": "Unknown arrival port"}
     
     # Calculate midpoint coordinates (simple average)
@@ -171,7 +176,12 @@ def get_route_weather(departure_port, arrival_port):
     
     # Calculate route average wind conditions (simple average)
     # Ensure we have valid data for all points, otherwise use user-provided or default values
-    if departure_weather and midpoint_weather and arrival_weather:
+    if departure_weather and midpoint_weather and arrival_weather and \
+       isinstance(departure_weather, dict) and isinstance(midpoint_weather, dict) and isinstance(arrival_weather, dict) and \
+       all(k in departure_weather for k in ["wind_speed", "wind_direction"]) and \
+       all(k in midpoint_weather for k in ["wind_speed", "wind_direction"]) and \
+       all(k in arrival_weather for k in ["wind_speed", "wind_direction"]):
+        
         avg_wind_speed = (departure_weather["wind_speed"] + midpoint_weather["wind_speed"] + arrival_weather["wind_speed"]) / 3
         
         # For wind direction, we need to handle the circular nature (0-360 degrees)
@@ -195,6 +205,7 @@ def get_route_weather(departure_port, arrival_port):
             "wind_direction": avg_wind_direction
         }
     else:
+        app.logger.warning("Could not calculate average route weather, using defaults.")
         # Use default values if we couldn't get weather data
         route_weather["average"] = {
             "wind_speed": 5.0,  # Default wind speed in m/s
@@ -210,19 +221,26 @@ def load_model(model_version="v12"):
     Falls back to a simple prediction function if model loading fails.
     """
     try:
-        model_path = os.path.join(os.path.dirname(__file__), "..", "model_files", f"model_{model_version}.pkl")
-        features_path = os.path.join(os.path.dirname(__file__), "..", "model_files", f"model_features_{model_version}.json")
+        # Use app.root_path for robust path construction
+        model_dir = os.path.join(app.root_path, 'model_files')
+        model_path = os.path.join(model_dir, f"model_{model_version}.pkl")
+        features_path = os.path.join(model_dir, f"model_features_{model_version}.json")
         
+        app.logger.info(f"Attempting to load model from: {model_path}") 
+        app.logger.info(f"Attempting to load features from: {features_path}")
+        app.logger.info(f"Files in model directory ({model_dir}): {os.listdir(model_dir) if os.path.exists(model_dir) else 'Directory not found'}")
+
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
         
         with open(features_path, 'r') as f:
             features = json.load(f)
         
+        app.logger.info("Model and features loaded successfully.")
         return model, features
     except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Using fallback prediction model")
+        app.logger.error(f"Error loading model: {e}", exc_info=True) # Log full traceback
+        app.logger.warning("Using fallback prediction model")
         
         # Create a simple fallback model that mimics the real model's interface
         class FallbackModel:
@@ -361,139 +379,154 @@ def calculate_relative_wind(wind_speed, wind_direction, course):
     }
 
 def predict_fuel(model, features, speed_kn, distance_nm, duration_hours, wind_speed, wind_direction, course):
-    """Predict fuel consumption for a voyage segment"""
+    """Predict fuel consumption for a voyage segment using the loaded model"""
+    # Prepare input data for the model
+    input_data = pd.DataFrame([{ 
+        "speed": speed_kn,
+        "distance_nm": distance_nm,
+        "duration_hours": duration_hours,
+        "wind_speed": wind_speed,
+        "wind_direction": wind_direction,
+        "course": course
+    }])
+    
+    # Calculate relative wind features
+    rel_wind = calculate_relative_wind(wind_speed, wind_direction, course)
+    input_data["relative_wind_speed"] = rel_wind["relative_wind_speed"]
+    input_data["relative_wind_direction"] = rel_wind["relative_wind_direction"]
+    input_data["head_wind"] = rel_wind["head_wind"]
+    input_data["cross_wind"] = rel_wind["cross_wind"]
+    
+    # Ensure all required features are present, fill missing with 0 or defaults
+    for feature in features:
+        if feature not in input_data.columns:
+            input_data[feature] = 0 # Or a more appropriate default
+            
+    # Select only the features the model expects
+    input_data = input_data[features]
+    
+    # Predict fuel consumption
     try:
-        # Calculate relative wind
-        rel_wind = calculate_relative_wind(wind_speed, wind_direction, course)
-        
-        # Create feature vector
-        feature_vector = {}
-        for feature in features:
-            if feature == "speed":
-                feature_vector[feature] = speed_kn
-            elif feature == "distance_nm":
-                feature_vector[feature] = distance_nm
-            elif feature == "duration_hours":
-                feature_vector[feature] = duration_hours
-            elif feature == "wind_speed":
-                feature_vector[feature] = wind_speed
-            elif feature == "wind_direction":
-                feature_vector[feature] = wind_direction
-            elif feature == "course":
-                feature_vector[feature] = course
-            elif feature == "relative_wind_speed":
-                feature_vector[feature] = rel_wind["relative_wind_speed"]
-            elif feature == "relative_wind_direction":
-                feature_vector[feature] = rel_wind["relative_wind_direction"]
-            elif feature == "head_wind":
-                feature_vector[feature] = rel_wind["head_wind"]
-            elif feature == "cross_wind":
-                feature_vector[feature] = rel_wind["cross_wind"]
-            else:
-                feature_vector[feature] = 0  # Default value for unknown features
-        
-        # Convert to DataFrame for prediction
-        X = pd.DataFrame([feature_vector])
-        
-        # Make prediction
-        fuel_pred = model.predict(X)[0]
-        
-        # Apply direct scaling to get realistic fuel consumption
-        # For a 12-hour voyage, fuel should be in the 5-9 MT range
-        # Scale based on duration relative to 12 hours
-        base_fuel_rate = 0.6  # MT per hour (gives 7.2 MT for 12 hours)
-        scaled_fuel = base_fuel_rate * duration_hours
-        
-        # Apply wind effect (up to 20% increase/decrease)
-        wind_effect = 1.0
-        if rel_wind["head_wind"] > 0:  # Headwind increases fuel consumption
-            wind_effect += min(0.2, rel_wind["head_wind"] * 0.02)  # Up to 20% increase
-        else:  # Tailwind decreases fuel consumption
-            wind_effect -= min(0.15, abs(rel_wind["head_wind"]) * 0.015)  # Up to 15% decrease
-        
-        # Apply speed effect (higher speeds use more fuel)
-        speed_effect = 1.0
-        if speed_kn > 12:
-            speed_effect += min(0.3, (speed_kn - 12) * 0.1)  # Up to 30% increase
-        elif speed_kn < 10:
-            speed_effect -= min(0.2, (10 - speed_kn) * 0.1)  # Up to 20% decrease
-        
-        final_fuel = scaled_fuel * wind_effect * speed_effect
-        
-        # Ensure fuel consumption is within realistic bounds for the duration
-        # For a 12-hour voyage, fuel should be in the 5-9 MT range
-        # Scale the bounds based on the voyage duration
-        min_fuel_12hr = 5.0
-        max_fuel_12hr = 9.0
-        
-        min_fuel = min_fuel_12hr * (duration_hours / 12)
-        max_fuel = max_fuel_12hr * (duration_hours / 12)
-        
-        if final_fuel < min_fuel:
-            final_fuel = min_fuel
-        elif final_fuel > max_fuel:
-            final_fuel = max_fuel
-        
-        return final_fuel
-        
+        fuel_prediction = model.predict(input_data)[0]
+        # Ensure prediction is non-negative
+        return max(0, fuel_prediction)
     except Exception as e:
-        print(f"Error predicting fuel: {e}")
-        # Fallback to simple calculation
-        # For a 12-hour voyage at 10 knots, predict around 7 MT
-        base_rate = 0.6  # MT per hour
-        return base_rate * duration_hours  # Simple linear model
+        app.logger.error(f"Error during fuel prediction: {e}", exc_info=True)
+        # Fallback prediction if model fails
+        # Simple estimate: 0.6 MT/hour at 10 knots, adjust for speed
+        base_rate = 0.6 * (speed_kn / 10)**2 # Fuel consumption scales roughly with speed squared
+        return max(0.1, base_rate * duration_hours) # Ensure a minimum fuel prediction
 
 # --- Flask Routes ---
 @app.route('/')
 def index():
-    """Render the main application page"""
+    """Render the main page"""
     return render_template('index.html')
+
+@app.route('/api/weather', methods=['GET'])
+def get_weather():
+    """API endpoint to get weather data for the route"""
+    departure_port = request.args.get('departure_port')
+    arrival_port = request.args.get('arrival_port')
+    
+    if not departure_port or not arrival_port:
+        return jsonify({"error": "Missing departure or arrival port"}), 400
+        
+    route_weather = get_route_weather(departure_port, arrival_port)
+    return jsonify(route_weather)
 
 @app.route('/api/optimize', methods=['POST'])
 def optimize_route():
-    """API endpoint to optimize route based on input parameters"""
+    """API endpoint to optimize the voyage based on input parameters"""
     try:
         data = request.get_json()
+        app.logger.info(f"Received optimization request data: {data}") # Log raw input
         
-        # Extract parameters
-        departure_port = data.get('departure_port', 'Khalifa Port')
-        arrival_port = data.get('arrival_port', 'Ruwais Port')
+        departure_port = data.get('departure_port')
+        arrival_port = data.get('arrival_port')
         required_arrival_time_str = data.get('required_arrival_time')
-        current_wind_speed = float(data.get('current_wind_speed', 5.0))
-        current_wind_direction = float(data.get('current_wind_direction', 90.0))
+        current_wind_speed = float(data.get('wind_speed', 5.0)) # Default 5 m/s
+        current_wind_direction = float(data.get('wind_direction', 90.0)) # Default 90 degrees
         
-        # Parse required arrival time
-        try:
-            # Parse ISO format with timezone
-            required_arrival_time = datetime.fromisoformat(required_arrival_time_str.replace('Z', '+00:00'))
-        except (ValueError, AttributeError):
-            # Fallback to format from datetime-local input (YYYY-MM-DDTHH:MM)
-            try:
-                required_arrival_time = datetime.strptime(required_arrival_time_str, '%Y-%m-%dT%H:%M')
-                # Assume UTC if no timezone specified
-                required_arrival_time = required_arrival_time.replace(tzinfo=timezone.utc)
-            except (ValueError, AttributeError):
-                # If all parsing fails, use current time + 24 hours
-                required_arrival_time = datetime.now(timezone.utc) + timedelta(hours=24)
-        
-        # Get route waypoints
+        # Validate inputs
+        if not all([departure_port, arrival_port, required_arrival_time_str]):
+            app.logger.error("Missing required input parameters")
+            return jsonify({"error": "Missing required input parameters"}), 400
+            
+        # Get waypoints for the route
         waypoints = get_relevant_waypoints(departure_port, arrival_port)
         if not waypoints:
-            return jsonify({
-                'success': False,
-                'error': f'No route found between {departure_port} and {arrival_port}'
-            })
-        
+            app.logger.error(f"Invalid route specified: {departure_port} to {arrival_port}")
+            return jsonify({"error": "Invalid route specified"}), 400
+            
+        # Define Dubai timezone
+        dubai_tz = pytz.timezone('Asia/Dubai')
+
+        try:
+            app.logger.info(f"Parsing arrival time string: \t{required_arrival_time_str}")
+            # Attempt to parse the arrival time string, trying multiple formats
+            parsed_time = None
+            formats_to_try = [
+                "%Y-%m-%dT%H:%M:%S", # ISO format without Z
+                "%Y-%m-%d %H:%M:%S", # Space separator
+                "%Y-%m-%dT%H:%M:%S%z", # ISO format with UTC offset (e.g., +0400)
+                "%Y-%m-%dT%H:%M:%S.%f%z", # ISO format with microseconds and offset
+                "%m/%d/%Y, %I:%M %p" # Format from frontend example: 05/31/2025, 12:00 AM
+            ]
+            
+            for fmt in formats_to_try:
+                try:
+                    parsed_time = datetime.strptime(required_arrival_time_str, fmt)
+                    app.logger.info(f"Successfully parsed \t{required_arrival_time_str}\t using format \t{fmt}")
+                    break # Stop trying formats once one works
+                except ValueError:
+                    continue # Try next format
+
+            if parsed_time is None:
+                 # If all formats failed, raise an error
+                 raise ValueError("Could not parse arrival time string with any known format.")
+
+            # Ensure the parsed time is timezone-aware and in Dubai timezone
+            if parsed_time.tzinfo is None or parsed_time.tzinfo.utcoffset(parsed_time) is None:
+                # Input was naive, assume it represents Dubai time
+                required_arrival_time = dubai_tz.localize(parsed_time)
+                app.logger.info(f"Localized naive time to Dubai TZ: {required_arrival_time}")
+            else:
+                # Input was already timezone-aware, convert it to Dubai time
+                required_arrival_time = parsed_time.astimezone(dubai_tz)
+                app.logger.info(f"Converted aware time to Dubai TZ: {required_arrival_time}")
+
+        except (ValueError, TypeError, AttributeError) as e:
+            app.logger.error(f"Error processing arrival time \t{required_arrival_time_str}\t: {e}", exc_info=True)
+            return jsonify({"error": f"Invalid arrival time format: \t{required_arrival_time_str}\t. Please use a standard format like YYYY-MM-DDTHH:MM:SS or MM/DD/YYYY, HH:MM AM/PM."}), 400
+
+        # Get current time, guaranteed to be timezone-aware in Dubai timezone
+        now = datetime.now(dubai_tz)
+
+        # Log before subtraction
+        app.logger.info(f"NOW (Dubai): {now}, TZ: {now.tzinfo}, Type: {type(now)}")
+        app.logger.info(f"ARRIVAL (Dubai): {required_arrival_time}, TZ: {required_arrival_time.tzinfo}, Type: {type(required_arrival_time)}")
+
+        # Calculate time difference (both should now be aware and in the same timezone)
+        time_until_arrival = (required_arrival_time - now).total_seconds() / 3600  # hours
+        app.logger.info(f"Time until arrival (hours): {time_until_arrival}")
+
+        if time_until_arrival <= 0:
+            app.logger.error(f"Required arrival time {required_arrival_time} is not in the future relative to {now}")
+            return jsonify({"error": "Required arrival time must be in the future"}), 400
+            
         # Get weather data for the route
         route_weather = get_route_weather(departure_port, arrival_port)
         
         # Use route average wind if available, otherwise use user input
-        if route_weather and 'average' in route_weather:
-            wind_speed = route_weather['average']['wind_speed']
-            wind_direction = route_weather['average']['wind_direction']
+        if route_weather and 'average' in route_weather and isinstance(route_weather['average'], dict):
+            wind_speed = route_weather['average'].get('wind_speed', current_wind_speed)
+            wind_direction = route_weather['average'].get('wind_direction', current_wind_direction)
+            app.logger.info(f"Using average route weather: Speed={wind_speed}, Dir={wind_direction}")
         else:
             wind_speed = current_wind_speed
             wind_direction = current_wind_direction
+            app.logger.info(f"Using user-provided weather: Speed={wind_speed}, Dir={wind_direction}")
         
         # Load model
         model, features = load_model()
@@ -509,155 +542,85 @@ def optimize_route():
         
         # Last waypoint has no next waypoint
         waypoints[-1]['distance_to_next_nm'] = 0
+        app.logger.info(f"Total route distance: {total_distance_nm:.2f} nm")
         
         # Calculate optimal speed based on arrival time
-        now = datetime.now(timezone.utc)
-        time_until_arrival = (required_arrival_time - now).total_seconds() / 3600  # hours
+        optimal_speed_kn = total_distance_nm / time_until_arrival
+        app.logger.info(f"Calculated optimal speed: {optimal_speed_kn:.2f} knots")
         
-        if time_until_arrival <= 0:
-            return jsonify({
-                'success': False,
-                'error': 'Required arrival time must be in the future'
-            })
+        # Basic validation for speed (e.g., vessel max speed)
+        MAX_SPEED_KN = 15 # Example max speed
+        MIN_SPEED_KN = 5  # Example min speed
+        if not (MIN_SPEED_KN <= optimal_speed_kn <= MAX_SPEED_KN):
+             app.logger.error(f"Calculated speed {optimal_speed_kn:.1f} knots is outside operational limits ({MIN_SPEED_KN}-{MAX_SPEED_KN} knots)")
+             return jsonify({
+                "error": f"Required arrival time results in an unrealistic speed ({optimal_speed_kn:.1f} knots). Please adjust arrival time. Min: {MIN_SPEED_KN} kn, Max: {MAX_SPEED_KN} kn."
+            }), 400
+            
+        # Simulate voyage segment by segment
+        voyage_plan = []
+        total_fuel_predicted = 0
+        current_time = now
         
-        # Calculate optimal speed (knots)
-        optimal_speed = total_distance_nm / time_until_arrival
-        
-        # Ensure speed is within reasonable bounds (8-14 knots)
-        if optimal_speed < 8:
-            optimal_speed = 8
-            # Recalculate arrival time
-            time_until_arrival = total_distance_nm / optimal_speed
-            adjusted_arrival_time = now + timedelta(hours=time_until_arrival)
-            message = f"Speed adjusted to minimum 8 knots. Estimated arrival: {adjusted_arrival_time.strftime('%Y-%m-%d %H:%M')} UTC"
-        elif optimal_speed > 14:
-            optimal_speed = 14
-            # Recalculate arrival time
-            time_until_arrival = total_distance_nm / optimal_speed
-            adjusted_arrival_time = now + timedelta(hours=time_until_arrival)
-            message = f"Speed adjusted to maximum 14 knots. Estimated arrival: {adjusted_arrival_time.strftime('%Y-%m-%d %H:%M')} UTC"
-        else:
-            message = f"Optimal speed calculated for arrival at {required_arrival_time.strftime('%Y-%m-%d %H:%M')} UTC"
-        
-        # Calculate fuel consumption for each segment and total
-        total_fuel_mt = 0
-        total_duration_hours = 0
-        
+        app.logger.info("Starting voyage simulation...")
         for i in range(len(waypoints) - 1):
             wp1 = waypoints[i]
             wp2 = waypoints[i + 1]
-            
             segment_distance = wp1['distance_to_next_nm']
-            segment_duration = segment_distance / optimal_speed
+            segment_duration_hours = segment_distance / optimal_speed_kn
+            segment_course = wp1['course_to_next']
             
-            # Predict fuel consumption for this segment
+            # Predict fuel for this segment
             segment_fuel = predict_fuel(
-                model, features,
-                optimal_speed, segment_distance, segment_duration,
-                wind_speed, wind_direction, wp1['course_to_next']
+                model, features, optimal_speed_kn, segment_distance, 
+                segment_duration_hours, wind_speed, wind_direction, segment_course
             )
+            total_fuel_predicted += segment_fuel
             
-            # Store segment details
-            waypoints[i]['suggested_speed_kn'] = optimal_speed
-            waypoints[i]['segment_duration_hours'] = segment_duration
-            waypoints[i]['segment_fuel_mt'] = segment_fuel
+            # Calculate segment end time
+            segment_end_time = current_time + timedelta(hours=segment_duration_hours)
             
-            total_fuel_mt += segment_fuel
-            total_duration_hours += segment_duration
-        
-        # Last waypoint has no next segment
-        waypoints[-1]['suggested_speed_kn'] = optimal_speed
-        waypoints[-1]['segment_duration_hours'] = 0
-        waypoints[-1]['segment_fuel_mt'] = 0
-        
-        # Calculate fuel savings compared to standard operations
-        # Assume standard operation is at 12 knots regardless of conditions
-        standard_duration = total_distance_nm / 12
-        standard_fuel = predict_fuel(
-            model, features,
-            12, total_distance_nm, standard_duration,
-            wind_speed, wind_direction, 0  # Use 0 as a default course
-        )
-        
-        fuel_savings_mt = max(0, standard_fuel - total_fuel_mt)
-        fuel_savings_percentage = (fuel_savings_mt / standard_fuel * 100) if standard_fuel > 0 else 0
-        
-        # Generate speed rationale
-        if optimal_speed < 10:
-            speed_rationale = f"A slower speed of {optimal_speed:.1f} knots is recommended due to favorable wind conditions (wind speed: {wind_speed:.1f} m/s, direction: {wind_direction:.0f}°) and sufficient time to arrival. This reduces engine load and optimizes fuel efficiency."
-        elif optimal_speed > 12:
-            speed_rationale = f"A higher speed of {optimal_speed:.1f} knots is necessary to meet the required arrival time. This increases fuel consumption but ensures timely arrival despite the {wind_speed:.1f} m/s winds from {wind_direction:.0f}°."
-        else:
-            speed_rationale = f"The optimal speed of {optimal_speed:.1f} knots balances fuel efficiency and timely arrival. Current wind conditions ({wind_speed:.1f} m/s from {wind_direction:.0f}°) have been factored into this calculation."
-        
-        # Generate savings commentary
-        if fuel_savings_percentage > 10:
-            savings_commentary = f"Following this optimized route and speed will save {fuel_savings_mt:.2f} MT of fuel ({fuel_savings_percentage:.1f}% reduction) compared to standard operations. This represents significant cost savings and environmental benefits."
-        elif fuel_savings_percentage > 5:
-            savings_commentary = f"This optimization provides moderate fuel savings of {fuel_savings_mt:.2f} MT ({fuel_savings_percentage:.1f}% reduction) compared to standard operations, balancing efficiency with operational requirements."
-        else:
-            savings_commentary = f"The optimization offers modest fuel savings of {fuel_savings_mt:.2f} MT ({fuel_savings_percentage:.1f}% reduction). While savings are limited due to schedule constraints, every reduction in fuel consumption contributes to cost efficiency and environmental goals."
-        
-        # Prepare response
-        response = {
-            'success': True,
-            'message': message,
-            'departure_port': departure_port,
-            'arrival_port': arrival_port,
-            'required_arrival_time': required_arrival_time.isoformat(),
-            'total_distance_nm': total_distance_nm,
-            'optimal_speed_kn': optimal_speed,
-            'estimated_duration_hours': total_duration_hours,
-            'total_estimated_fuel_mt': total_fuel_mt,
-            'average_suggested_speed_kn': optimal_speed,
-            'fuel_savings_mt': fuel_savings_mt,
-            'fuel_savings_percentage': fuel_savings_percentage,
-            'speed_rationale': speed_rationale,
-            'savings_commentary': savings_commentary,
-            'route_details': waypoints,
-            'weather_data': route_weather
+            voyage_plan.append({
+                "segment": i + 1,
+                "from": wp1['name'],
+                "to": wp2['name'],
+                "distance_nm": round(segment_distance, 2),
+                "course": segment_course,
+                "speed_kn": round(optimal_speed_kn, 2),
+                "duration_hours": round(segment_duration_hours, 2),
+                "predicted_fuel_mt": round(segment_fuel, 3),
+                "estimated_departure_time": current_time.isoformat(),
+                "estimated_arrival_time": segment_end_time.isoformat()
+            })
+            
+            # Update current time for next segment
+            current_time = segment_end_time
+            
+        app.logger.info(f"Voyage simulation complete. Total predicted fuel: {total_fuel_predicted:.3f} MT")
+        # Prepare results
+        results = {
+            "departure_port": departure_port,
+            "arrival_port": arrival_port,
+            "required_arrival_time": required_arrival_time.isoformat(),
+            "total_distance_nm": round(total_distance_nm, 2),
+            "calculated_optimal_speed_kn": round(optimal_speed_kn, 2),
+            "estimated_voyage_duration_hours": round(total_distance_nm / optimal_speed_kn, 2),
+            "total_predicted_fuel_mt": round(total_fuel_predicted, 3),
+            "wind_speed_used_mps": round(wind_speed, 2),
+            "wind_direction_used_deg": round(wind_direction, 1),
+            "voyage_plan": voyage_plan
         }
         
-        return jsonify(response)
+        return jsonify(results)
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        })
-
-@app.route('/api/weather', methods=['GET'])
-def get_weather():
-    """API endpoint to get current weather data for the route"""
-    try:
-        # Get query parameters
-        departure_port = request.args.get('departure_port', 'Khalifa Port')
-        arrival_port = request.args.get('arrival_port', 'Ruwais Port')
-        
-        # Get weather data for the route
-        route_weather = get_route_weather(departure_port, arrival_port)
-        
-        # Add waypoints for map visualization
-        waypoints = get_relevant_waypoints(departure_port, arrival_port)
-        
-        response = {
-            'success': True,
-            'weather_data': route_weather,
-            'waypoints': waypoints,
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
-        
-        return jsonify(response)
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        })
+        app.logger.error(f"Error in /api/optimize: {e}", exc_info=True)
+        # import traceback
+        # traceback.print_exc() # Print detailed traceback to logs (already done by logger)
+        return jsonify({"error": "An internal error occurred during optimization."}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5003, debug=True)
+    # Use Gunicorn in production, this is for local development
+    # Set debug=False for production-like testing
+    app.run(debug=False, host='0.0.0.0', port=5000)
+

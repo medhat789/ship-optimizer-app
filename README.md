@@ -93,9 +93,10 @@ This guide provides step-by-step instructions for deploying the Flask-based ship
 1.  Make changes to your code locally.
 2.  Commit the changes to Git:
     ```bash
-  git add src/main.py
-git commit -m "Fix datetime handling and model path issues"
-git push origin main
+HEAD
+    git add .
+    git commit -m "Your update description"
+954839d (Update main.py and requirements.txt with timezone fix)
     ```
 3.  Push the changes to GitHub:
     ```bash
