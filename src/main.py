@@ -600,6 +600,7 @@ def optimize_route():
         app.logger.info(f"Voyage simulation complete. Total predicted fuel: {total_fuel_predicted:.3f} MT")
         # Prepare results
         results = {
+            "success": True, # Add success flag for frontend
             "departure_port": departure_port,
             "arrival_port": arrival_port,
             "required_arrival_time": required_arrival_time.isoformat(),
