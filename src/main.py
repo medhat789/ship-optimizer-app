@@ -583,15 +583,18 @@ def optimize_route():
             
             voyage_plan.append({
                 "segment": i + 1,
-                "from": wp1['name'],
-                "to": wp2['name'],
-                "distance_nm": round(segment_distance, 2),
-                "course": segment_course,
-                "speed_kn": round(optimal_speed_kn, 2),
-                "duration_hours": round(segment_duration_hours, 2),
-                "predicted_fuel_mt": round(segment_fuel, 3),
-                "estimated_departure_time": current_time.isoformat(),
-                "estimated_arrival_time": segment_end_time.isoformat()
+                "name": wp1["name"], # Use 'name' key expected by frontend
+                "to": wp2["name"], # Keep 'to' for potential future use, but frontend uses 'name' of next segment implicitly
+                "distance_to_next_nm": round(segment_distance, 2), # Use 'distance_to_next_nm' key
+                "course_to_next": segment_course, # Use 'course_to_next' key
+                "suggested_speed_kn": round(optimal_speed_kn, 2), # Use 'suggested_speed_kn' key
+                "duration_hours": round(segment_duration_hours, 2), # Keep for potential future use
+                "predicted_fuel_mt": round(segment_fuel, 3), # Keep for potential future use
+                "estimated_departure_time": current_time.isoformat(), # Keep for potential future use
+                "estimated_arrival_time": segment_end_time.isoformat(), # Keep for potential future use
+                # Add lat/lon if needed by frontend map (check main.js)
+                "lat": wp1["lat"],
+                "lon": wp1["lon"]
             })
             
             # Update current time for next segment
