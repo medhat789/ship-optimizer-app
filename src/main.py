@@ -598,19 +598,25 @@ def optimize_route():
             current_time = segment_end_time
             
         app.logger.info(f"Voyage simulation complete. Total predicted fuel: {total_fuel_predicted:.3f} MT")
-        # Prepare results
+        # Prepare results, ensuring keys match frontend expectations
         results = {
             "success": True, # Add success flag for frontend
             "departure_port": departure_port,
             "arrival_port": arrival_port,
             "required_arrival_time": required_arrival_time.isoformat(),
             "total_distance_nm": round(total_distance_nm, 2),
-            "calculated_optimal_speed_kn": round(optimal_speed_kn, 2),
-            "estimated_voyage_duration_hours": round(total_distance_nm / optimal_speed_kn, 2),
-            "total_predicted_fuel_mt": round(total_fuel_predicted, 3),
+            "average_suggested_speed_kn": round(optimal_speed_kn, 2), # Renamed from calculated_optimal_speed_kn
+            "estimated_duration_hours": round(total_distance_nm / optimal_speed_kn, 2), # Renamed from estimated_voyage_duration_hours
+            "total_estimated_fuel_mt": round(total_fuel_predicted, 3), # Renamed from total_predicted_fuel_mt
             "wind_speed_used_mps": round(wind_speed, 2),
             "wind_direction_used_deg": round(wind_direction, 1),
-            "voyage_plan": voyage_plan
+            "route_details": voyage_plan, # Renamed from voyage_plan
+            # Add placeholder/default values for fields expected by frontend but not calculated by fallback
+            "fuel_savings_mt": 0.0,
+            "fuel_savings_percentage": 0.0,
+            "speed_rationale": "Speed calculated to meet arrival time (using fallback model).",
+            "savings_commentary": "Fuel savings analysis not available when using fallback model.",
+            "message": "Optimization complete (using fallback prediction model due to primary model load error)."
         }
         
         return jsonify(results)
