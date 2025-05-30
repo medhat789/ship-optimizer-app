@@ -467,6 +467,7 @@ def optimize_route():
             # Attempt to parse the arrival time string, trying multiple formats
             parsed_time = None
             formats_to_try = [
+                "%Y-%m-%dT%H:%M", # Format from datetime-local input
                 "%Y-%m-%dT%H:%M:%S", # ISO format without Z
                 "%Y-%m-%d %H:%M:%S", # Space separator
                 "%Y-%m-%dT%H:%M:%S%z", # ISO format with UTC offset (e.g., +0400)
